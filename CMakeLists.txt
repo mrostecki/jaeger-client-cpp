@@ -9,9 +9,8 @@ set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/toolchain.cmake"
 include(CMakeDependentOption)
 include(HunterGate)
 HunterGate(
-    URL "https://github.com/ruslo/hunter/archive/v0.20.18.tar.gz"
-    SHA1 "c2614bc107a5172c167a5784f476b6fb39e314a9"
-    LOCAL
+    URL "https://github.com/ruslo/hunter/archive/v0.20.62.tar.gz"
+    SHA1 "10ffae63cf7b07193d6d7b459c1d0cfa242fad5b"
 )
 
 project(jaegertracing VERSION 0.3.0)
@@ -36,16 +35,9 @@ endif()
 set(package_deps)
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
-    CMAKE_CXX_COMPILER_VERSION VERSION_LESS "4.9")
-  set(boost_components regex)
-  hunter_add_package(Boost COMPONENTS regex)
-  list(APPEND LIBS Boost::regex)
-else()
-  set(boost_components)
-  hunter_add_package(Boost)
+   CMAKE_CXX_COMPILER_VERSION VERSION_LESS "4.9")
+  message(FATAL_ERROR "Must use gcc >= 4.9")
 endif()
-find_package(Boost ${hunter_config} REQUIRED ${boost_components})
-list(APPEND package_deps Boost)
 
 hunter_add_package(thrift)
 find_package(thrift ${hunter_config} REQUIRED)
@@ -98,38 +90,6 @@ if(BUILD_TESTING)
       set(COVERAGE_EXCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/src/jaegertracing/thrift-gen/*"
                             "*Test.cpp")
   endif()
-endif()
-
-if(JAEGERTRACING_BUILD_CROSSDOCK)
-  set(CROSSDOCK_SRC crossdock/Server.cpp)
-  add_executable(crossdock ${CROSSDOCK_SRC})
-  target_include_directories(crossdock PUBLIC
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/crossdock>)
-  target_link_libraries(crossdock PUBLIC jaegertracing-static)
-
-  set(JAEGER_CROSSDOCK_URL
-"https://raw.githubusercontent.com/jaegertracing/jaeger/master/docker-compose/\
-jaeger-docker-compose.yml")
-  file(DOWNLOAD ${JAEGER_CROSSDOCK_URL}
-       "${PROJECT_SOURCE_DIR}/crossdock/jaeger-docker-compose.yml")
-  find_program(DOCKER_COMPOSE_EXE docker-compose REQUIRED)
-  set(DOCKER_COMPOSE_CMD ${DOCKER_COMPOSE_EXE}
-      -f ${PROJECT_SOURCE_DIR}/crossdock/docker-compose.yml
-      -f ${PROJECT_SOURCE_DIR}/crossdock/jaeger-docker-compose.yml)
-  add_custom_target(crossdock-kill
-    COMMAND ${DOCKER_COMPOSE_CMD} kill
-    COMMAND ${DOCKER_COMPOSE_CMD} rm --force)
-  add_custom_target(crossdock-run
-    COMMAND ${DOCKER_COMPOSE_CMD} build
-    COMMAND ${DOCKER_COMPOSE_CMD} run crossdock
-    DEPENDS crossdock-kill)
-  add_custom_target(crossdock-fresh
-    COMMAND ${DOCKER_COMPOSE_CMD} pull
-    COMMAND ${DOCKER_COMPOSE_CMD} build
-    COMMAND ${DOCKER_COMPOSE_CMD} run crossdock
-    DEPENDS crossdock-kill)
-  add_custom_target(crossdock-logs
-    COMMAND ${DOCKER_COMPOSE_CMD} logs)
 endif()
 
 set(SRC
@@ -203,7 +163,6 @@ set(SRC
     src/jaegertracing/thrift-gen/Collector.cpp
     src/jaegertracing/thrift-gen/Dependency.cpp
     src/jaegertracing/thrift-gen/SamplingManager.cpp
-    src/jaegertracing/thrift-gen/TracedService.cpp
     src/jaegertracing/thrift-gen/ZipkinCollector.cpp
     src/jaegertracing/thrift-gen/agent_constants.cpp
     src/jaegertracing/thrift-gen/agent_types.cpp
@@ -217,25 +176,52 @@ set(SRC
     src/jaegertracing/thrift-gen/jaeger_types.cpp
     src/jaegertracing/thrift-gen/sampling_constants.cpp
     src/jaegertracing/thrift-gen/sampling_types.cpp
-    src/jaegertracing/thrift-gen/tracetest_constants.cpp
-    src/jaegertracing/thrift-gen/tracetest_types.cpp
     src/jaegertracing/thrift-gen/zipkincore_constants.cpp
     src/jaegertracing/thrift-gen/zipkincore_types.cpp
     src/jaegertracing/utils/ErrorUtil.cpp
     src/jaegertracing/utils/HexParsing.cpp
     src/jaegertracing/utils/RateLimiter.cpp
-    src/jaegertracing/utils/Regex.cpp
     src/jaegertracing/utils/UDPClient.cpp
     src/jaegertracing/utils/YAML.cpp)
 
-add_library(jaegertracing SHARED ${SRC})
-target_include_directories(jaegertracing PUBLIC
-  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
-  $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/src>)
-target_link_libraries(jaegertracing ${LIBS})
-set_target_properties(jaegertracing PROPERTIES
-  VERSION ${PROJECT_VERSION}
-  SOVERSION ${PROJECT_VERSION_MAJOR})
+if(JAEGERTRACING_BUILD_CROSSDOCK)
+  list(APPEND SRC
+    src/jaegertracing/thrift-gen/TracedService.cpp
+    src/jaegertracing/thrift-gen/tracetest_constants.cpp
+    src/jaegertracing/thrift-gen/tracetest_types.cpp)
+endif()
+
+function(add_lib_deps lib)
+  target_include_directories(${lib} PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/src>)
+  target_link_libraries(${lib} PUBLIC ${LIBS})
+endfunction()
+
+option(JAEGERTRACING_PLUGIN "Build dynamic plugin" OFF)
+cmake_dependent_option(BUILD_SHARED_LIBS "Build shared libraries" ON
+  "NOT JAEGERTRACING_PLUGIN" OFF)
+
+if(BUILD_SHARED_LIBS)
+  add_library(jaegertracing SHARED ${SRC})
+  add_lib_deps(jaegertracing)
+  set_target_properties(jaegertracing PROPERTIES
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR})
+  set(JAEGERTRACING_LIB jaegertracing)
+  list(APPEND JAEGERTRACING_LIBS jaegertracing)
+endif()
+
+if(JAEGERTRACING_PLUGIN)
+  file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/export.map
+    "{ global: OpenTracingMakeTracerFactory; local: *; };")
+  add_library(jaegertracing_plugin MODULE ${SRC})
+  add_lib_deps(jaegertracing_plugin)
+  target_link_libraries(jaegertracing_plugin PUBLIC
+    -static-libgcc
+    -static-libstdc++
+    -Wl,--version-script=${CMAKE_CURRENT_BINARY_DIR}/export.map)
+endif()
 
 add_library(jaegertracing-static STATIC ${SRC})
 target_include_directories(jaegertracing-static PUBLIC
@@ -252,17 +238,24 @@ configure_file(
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
 if(BUILD_TESTING)
-  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/src/jaegertracing/testutils")
-  set(TEST_SRC
+  add_library(testutils
+      src/jaegertracing/testutils/TUDPTransport.cpp
+      src/jaegertracing/testutils/SamplingManager.cpp
+      src/jaegertracing/testutils/MockAgent.cpp
+      src/jaegertracing/testutils/TracerUtil.cpp)
+  target_link_libraries(testutils PUBLIC ${JAEGERTRACING_LIB})
+
+  add_executable(UnitTest
       src/jaegertracing/ConfigTest.cpp
+      src/jaegertracing/DynamicLoadTest.cpp
       src/jaegertracing/ReferenceTest.cpp
       src/jaegertracing/SpanContextTest.cpp
       src/jaegertracing/SpanTest.cpp
       src/jaegertracing/TagTest.cpp
       src/jaegertracing/TraceIDTest.cpp
-      src/jaegertracing/TracerTest.cpp
       src/jaegertracing/TracerFactoryTest.cpp
       src/jaegertracing/DynamicLoadTest.cpp
+      src/jaegertracing/TracerTest.cpp
       src/jaegertracing/UDPTransportTest.cpp
       src/jaegertracing/baggage/BaggageTest.cpp
       src/jaegertracing/metrics/MetricsTest.cpp
@@ -277,12 +270,10 @@ if(BUILD_TESTING)
       src/jaegertracing/reporters/ReporterTest.cpp
       src/jaegertracing/samplers/SamplerTest.cpp
       src/jaegertracing/testutils/MockAgentTest.cpp
-      src/jaegertracing/testutils/TracerUtil.cpp
       src/jaegertracing/testutils/TUDPTransportTest.cpp
       src/jaegertracing/utils/ErrorUtilTest.cpp
       src/jaegertracing/utils/RateLimiterTest.cpp
       src/jaegertracing/utils/UDPClientTest.cpp)
-  add_executable(UnitTest ${TEST_SRC})
   target_compile_definitions(UnitTest PUBLIC
       GTEST_HAS_TR1_TUPLE=0
       GTEST_USE_OWN_TR1_TUPLE=0)
@@ -303,6 +294,40 @@ if(BUILD_TESTING)
                                 DEPENDENCIES UnitTest)
   endif()
 endif()
+
+if(JAEGERTRACING_BUILD_CROSSDOCK)
+  set(CROSSDOCK_SRC crossdock/Server.cpp)
+  add_executable(crossdock ${CROSSDOCK_SRC})
+  target_include_directories(crossdock PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/crossdock>)
+  target_link_libraries(crossdock PUBLIC ${JAEGERTRACING_LIB})
+
+  set(JAEGER_CROSSDOCK_URL
+"https://raw.githubusercontent.com/jaegertracing/jaeger/master/docker-compose/\
+jaeger-docker-compose.yml")
+  file(DOWNLOAD ${JAEGER_CROSSDOCK_URL}
+       "${CMAKE_CURRENT_SOURCE_DIR}/crossdock/jaeger-docker-compose.yml")
+  find_program(DOCKER_COMPOSE_EXE docker-compose REQUIRED)
+  set(DOCKER_COMPOSE_CMD ${DOCKER_COMPOSE_EXE}
+      -f ${CMAKE_CURRENT_SOURCE_DIR}/crossdock/docker-compose.yml
+      -f ${CMAKE_CURRENT_SOURCE_DIR}/crossdock/jaeger-docker-compose.yml)
+  add_custom_target(crossdock-kill
+    COMMAND ${DOCKER_COMPOSE_CMD} kill
+    COMMAND ${DOCKER_COMPOSE_CMD} rm --force)
+  add_custom_target(crossdock-run
+    COMMAND ${DOCKER_COMPOSE_CMD} build
+    COMMAND ${DOCKER_COMPOSE_CMD} run crossdock
+    DEPENDS crossdock-kill)
+  add_custom_target(crossdock-fresh
+    COMMAND ${DOCKER_COMPOSE_CMD} pull
+    COMMAND ${DOCKER_COMPOSE_CMD} build
+    COMMAND ${DOCKER_COMPOSE_CMD} run crossdock
+    DEPENDS crossdock-kill)
+  add_custom_target(crossdock-logs
+    COMMAND ${DOCKER_COMPOSE_CMD} logs)
+endif()
+
+
 
 # Installation (https://github.com/forexample/package-example)
 
